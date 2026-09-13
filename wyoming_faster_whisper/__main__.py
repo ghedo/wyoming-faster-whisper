@@ -79,8 +79,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--device",
         default="cpu",
-        help="Device to use for inference: cpu, cuda, or cuda:N (default: cpu). "
-        "CUDA requires the GPU image or GPU-enabled wheels; see README.",
+        help="Device to use for inference: cpu, cuda, cuda:N, rocm, or rocm:N "
+        "(default: cpu). GPU devices require the matching image or wheels; see "
+        "README.",
     )
     parser.add_argument(
         "--language",
@@ -91,7 +92,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--compute-type",
         default="default",
         help="Compute type for faster-whisper (float16, int8, etc.); "
-        "defaults to float16 on CUDA and to the model's own type on CPU",
+        "defaults to float16 on a GPU and to the model's own type on CPU",
     )
     parser.add_argument(
         "--beam-size",

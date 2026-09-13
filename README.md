@@ -211,7 +211,7 @@ networks:
     internal: true
 ```
 
-Both images point `HF_HOME`, `XDG_CACHE_HOME`, and `MODELSCOPE_CACHE` at `/data`
+All images point `HF_HOME`, `XDG_CACHE_HOME`, and `MODELSCOPE_CACHE` at `/data`
 so the caches these libraries keep outside the model directory land on the
 volume too. The largest is the Xet chunk cache used while downloading, which can
 run to several GB. Outside Docker, set them yourself if you don't want them in
@@ -219,7 +219,7 @@ run to several GB. Outside Docker, set them yourself if you don't want them in
 
 ### Health Check
 
-Both images carry a `HEALTHCHECK`, so `docker ps` reports `healthy` or
+All images carry a `HEALTHCHECK`, so `docker ps` reports `healthy` or
 `unhealthy` and a Compose stack can wait on it with `depends_on:` /
 `condition: service_healthy`. It sends the server a `Describe` and requires an
 `Info` with an ASR program back, rather than only opening a socket: the port is
@@ -255,18 +255,22 @@ to the check, so give it the same one:
              "--uri", "tcp://127.0.0.1:10400"]
 ```
 
-### GPU Image
+### GPU Images
 
-`Dockerfile.gpu` runs the speech-to-text backends on an NVIDIA GPU. **It is not
-published to Docker Hub — you build it yourself**, because it comes out around
-10.7 GB (mostly the CUDA torch wheel) against ~1.6 GB for the CPU image, and
-Home Assistant OS has no GPU passthrough, so everyone who can use it is already
-running Docker directly.
+The CUDA and ROCm images are **not published to Docker Hub**. They are much
+larger than the CPU image, and Home Assistant OS has no GPU passthrough, so build
+the image matching the host GPU locally.
+
+#### CUDA
+
+`Dockerfile.CUDA` runs the supported speech-to-text backends on an NVIDIA GPU. It
+comes out around 10.7 GB (mostly the CUDA torch wheel) against ~1.6 GB for the
+CPU image.
 
 ``` sh
 git clone https://github.com/OHF-Voice/wyoming-faster-whisper.git
 cd wyoming-faster-whisper
-docker build -f Dockerfile.gpu -t wyoming-whisper:gpu .
+docker build -f Dockerfile.CUDA -t wyoming-whisper:cuda .
 ```
 
 Running it needs the
@@ -275,7 +279,7 @@ on the host, and `--gpus`:
 
 ``` sh
 docker run -it --gpus all -p 10300:10300 -v /path/to/local/data:/data \
-    wyoming-whisper:gpu --language en
+    wyoming-whisper:cuda --language en
 ```
 
 `--device cuda` is the default in this image; pass `--device cuda:1` to pick a
@@ -285,15 +289,13 @@ CPU, and a GPU can comfortably run much larger ones:
 
 ``` sh
 docker run -it --gpus all -p 10300:10300 -v /path/to/local/data:/data \
-    wyoming-whisper:gpu --model Systran/faster-whisper-large-v3 --language en
+    wyoming-whisper:cuda --model Systran/faster-whisper-large-v3 --language en
 ```
 
 Notes and limits:
 
-- **NVIDIA and amd64 only.** CTranslate2, which faster-whisper is built on, has
-  no ROCm or Intel XPU backend and publishes no arm64 CUDA wheel. The
-  torch-based backends (`--stt-library transformers`, `--stt-library funasr`)
-  would work on ROCm or XPU, but that would be a different image.
+- **NVIDIA and amd64 only.** CTranslate2 publishes no arm64 CUDA wheel. Jetson
+  requires a JetPack-specific image.
 - **Budget the disk.** ~10.7 GB for the image, plus build cache. Don't build it
   on a Pi by accident.
 - **`--stt-library sherpa` runs on the CPU even in this image.** A CUDA
@@ -304,6 +306,43 @@ Notes and limits:
 
 If `--device cuda` produces no speedup, check the log: the server warns when the
 installed onnxruntime or sherpa-onnx build has no usable CUDA support.
+
+#### ROCm
+
+`Dockerfile.ROCm` targets AMD GPUs on amd64. It uses AMD's matched ROCm image
+with PyTorch and ONNX Runtime, plus CTranslate2's official ROCm wheel. It
+includes FunASR as well as the extras in the CPU image.
+
+``` sh
+docker build -f Dockerfile.ROCm -t wyoming-whisper:rocm .
+docker run -it --device=/dev/kfd --device=/dev/dri --group-add video \
+    -p 10300:10300 -v /path/to/local/data:/data \
+    wyoming-whisper:rocm --stt-library faster-whisper --language en
+```
+
+`--device rocm` is the default. Pass `--device rocm:1` to pick a GPU or
+`--device cpu` to fall back. Internally, PyTorch and CTranslate2 expose ROCm
+through their `cuda` APIs, while ONNX Runtime uses
+`MIGraphXExecutionProvider`.
+
+Backend support and limits:
+
+- **faster-whisper** runs through CTranslate2 on ROCm. Its released Linux wheel
+  targets `gfx1030`, `gfx1100`, `gfx1101`, `gfx1102`, `gfx1150`, `gfx1151`,
+  `gfx1200`, and `gfx1201`. Other architectures require a custom CTranslate2
+  build.
+- **transformers** and **FunASR** run through PyTorch ROCm.
+- **onnx-asr** and **qwen3-asr** use ONNX Runtime's MIGraphX provider with a CPU
+  fallback for unsupported graph nodes. The amount of GPU acceleration is
+  model-dependent, especially for qwen3-asr's int4 graphs.
+- **sherpa-onnx runs on the CPU.** Its
+  [ROCm provider change](https://github.com/k2-fsa/sherpa-onnx/pull/2370) is not
+  merged, and published wheels have no ROCm provider. The server logs this
+  fallback rather than silently accepting `--device rocm`.
+
+With `--stt-library auto`, English may select sherpa-onnx and therefore run on
+the CPU. Select `faster-whisper`, `transformers`, `funasr`, `onnx-asr`, or
+`qwen3-asr` explicitly when GPU execution is required.
 
 ### GPU Without Docker
 
@@ -320,7 +359,13 @@ your CUDA version, and it depends on `onnxruntime` (for its bundled Silero VAD),
 which will pull the CPU package back in and clobber `onnxruntime-gpu` — both
 install the same `onnxruntime` module and whichever lands second wins, silently,
 since the CPU provider still loads every model. Reinstall `onnxruntime-gpu`
-last. `Dockerfile.gpu` does exactly this and is the working reference.
+last. `Dockerfile.CUDA` does exactly this and is the working reference.
+
+For ROCm, PyTorch, CTranslate2, ONNX Runtime, and the installed ROCm runtime must
+be built for compatible ROCm versions. `Dockerfile.ROCm` is the working matched
+reference. AMD publishes the ONNX Runtime MIGraphX wheel outside PyPI, and
+CTranslate2 publishes its ROCm wheels as GitHub release assets, so installing
+the normal PyPI packages alone gives CPU builds.
 
 ## Environment Variables
 

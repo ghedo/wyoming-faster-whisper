@@ -1,0 +1,95 @@
+# ROCm variant of the CPU image in ./Dockerfile.
+#
+# Not published to Docker Hub. Build it locally:
+#
+#   docker build -f Dockerfile.ROCm -t wyoming-whisper:rocm .
+#
+# This image is amd64 only. It uses AMD's matched ROCm image with PyTorch and
+# ONNX Runtime, plus CTranslate2's official ROCm wheel. PyTorch and CTranslate2
+# expose AMD GPUs through their "cuda" APIs; the server's user-facing "rocm"
+# device translates that while selecting MIGraphX for ONNX.
+#
+# sherpa-onnx stays on the CPU. Its ROCm execution provider is still an unmerged
+# upstream change, and the published Python wheels have no ROCm support. The
+# server logs a warning and uses sherpa's CPU provider instead.
+ARG ROCM_VERSION=7.2.1
+FROM rocm/onnxruntime:rocm${ROCM_VERSION}_ub24.04_ort1.23_torch2.9.1
+
+ARG ROCM_VERSION
+ARG CTRANSLATE2_VERSION=4.8.2
+ARG CTRANSLATE2_WHEELS_SHA256=b469e765f74ef85fb97bf4fe2347c8c6296dda00d7f5cf20658f23e95004a925
+ARG ONNXRUNTIME_MIGRAPHX_VERSION=1.23.2
+
+WORKDIR /usr/src
+
+COPY ./pyproject.toml ./
+RUN \
+    apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openmpi-bin \
+        unzip \
+        wget \
+    \
+    # Reuse the base image's environment instead of downloading second copies
+    # of its multi-gigabyte ROCm PyTorch and ONNX Runtime installations.
+    && ln -s /opt/venv .venv \
+    && .venv/bin/pip3 install --no-cache-dir -U \
+        setuptools \
+        wheel \
+    \
+    # ROCm wheels are release assets rather than PyPI packages. Extract only
+    # the wheel matching the base image's Python interpreter.
+    && wget -q \
+        "https://github.com/OpenNMT/CTranslate2/releases/download/v${CTRANSLATE2_VERSION}/rocm-python-wheels-Linux.zip" \
+        -O /tmp/ctranslate2-rocm.zip \
+    && echo "${CTRANSLATE2_WHEELS_SHA256}  /tmp/ctranslate2-rocm.zip" \
+        | sha256sum --check - \
+    && mkdir /tmp/ctranslate2-rocm \
+    && unzip -j -q /tmp/ctranslate2-rocm.zip \
+        '*cp312*manylinux*x86_64.whl' -d /tmp/ctranslate2-rocm \
+    && .venv/bin/pip3 install --no-cache-dir /tmp/ctranslate2-rocm/*.whl \
+    \
+    && .venv/bin/pip3 install --no-cache-dir \
+        -e '.[zeroconf,transformers,funasr,sherpa,onnx-asr,qwen3-asr,hass]' \
+        "onnxruntime==${ONNXRUNTIME_MIGRAPHX_VERSION}" \
+    \
+    # faster-whisper and the onnx-asr CPU extra install PyPI's CPU runtime.
+    # Install AMD's wheel last because both distributions provide the same
+    # "onnxruntime" module and the last installation wins. Keep the CPU package
+    # metadata so dependencies on the distribution named "onnxruntime" remain
+    # satisfied and later general dependency resolution does not reinstall it.
+    && .venv/bin/pip3 install --no-cache-dir --force-reinstall --no-deps \
+        "https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/onnxruntime_migraphx-${ONNXRUNTIME_MIGRAPHX_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" \
+    \
+    && rm -rf \
+        /tmp/ctranslate2-rocm \
+        /tmp/ctranslate2-rocm.zip \
+        /var/lib/apt/lists/*
+
+COPY ./ ./
+
+# CTranslate2's default GPU allocator (hipMallocAsync memory pools) silently
+# corrupts buffers on consumer RDNA GPUs after the first inference: the first
+# transcription is correct, later ones come back as garbage or crash.
+# hipcub's caching allocator is immune and is at least as fast, so make it the
+# image default. Users can override with CT2_CUDA_ALLOCATOR=cuda_malloc_async.
+# See OpenNMT/CTranslate2#1072, #2012, #2021, #2038, #2090 and
+# ROCm/rocm-systems#10943.
+#
+# HF_HOME/XDG_CACHE_HOME/MODELSCOPE_CACHE keep the library caches on the /data
+# volume; see the CPU image for why they have to be set here and not in Python.
+ENV LD_LIBRARY_PATH=/opt/rocm/lib/llvm/lib \
+    STT_DEVICE=rocm \
+    CT2_CUDA_ALLOCATOR=cub_caching \
+    HF_HOME=/data \
+    XDG_CACHE_HOME=/data \
+    MODELSCOPE_CACHE=/data/modelscope
+
+EXPOSE 10300
+
+# See the CPU image for why this is a Describe/Info round trip and why the start
+# period is this long.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=5m --retries=3 \
+    CMD ["/usr/src/.venv/bin/python3", "-m", "wyoming_faster_whisper.health_check"]
+
+ENTRYPOINT ["bash", "docker_run.sh"]

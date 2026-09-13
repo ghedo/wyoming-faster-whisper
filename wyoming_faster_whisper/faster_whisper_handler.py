@@ -30,8 +30,8 @@ class FasterWhisperTranscriber(Transcriber):
         self.vad_parameters = vad_parameters
         self.task = task
 
-        # CTranslate2 takes the GPU ordinal separately, so "cuda:1" has to be
-        # split into device + device_index.
+        # CTranslate2 takes the GPU ordinal separately and calls ROCm devices
+        # "cuda", so translate both parts before loading the model.
         ct2_device, ct2_device_index = ctranslate2_device(device)
         extra_args: Dict[str, Any] = {}
         if ct2_device_index is not None:

@@ -96,10 +96,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Dockerfile.gpu is deliberately not built or published here. It comes out
-  # around 10.7 GB (mostly the CUDA torch wheel) versus ~1.6 GB for the CPU
-  # image, and Home Assistant OS has no GPU passthrough, so its whole audience
-  # is running Docker directly and can build it locally. See the README.
+  # Dockerfile.CUDA and Dockerfile.ROCm are deliberately not built or published
+  # here. They are much larger than the CPU image, and Home Assistant OS has no
+  # GPU passthrough, so their audience can build them locally. See the README.
 
   changelog:
     needs: build

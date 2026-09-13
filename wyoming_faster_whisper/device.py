@@ -1,15 +1,16 @@
 """Translation of the --device option into each backend's own vocabulary.
 
 There is one user-facing device string, but the backends disagree on how to name
-hardware: CTranslate2 and sherpa-onnx take "cpu"/"cuda", torch takes
-"cpu"/"cuda"/"cuda:1", and onnxruntime takes an ordered list of execution
-providers. Resolving that in one place keeps the string-sniffing out of the five
-handlers, and keeps the rules testable without any backend installed.
+hardware: CTranslate2 and torch expose ROCm devices through their "cuda" APIs,
+sherpa-onnx has no ROCm provider, and onnxruntime uses named execution providers.
+Resolving that in one place keeps the string-sniffing out of the handlers, and
+keeps the rules testable without any backend installed.
 
-Accepted values are "cpu", "cuda", and "cuda:N". Anything else is passed through
-unchanged to the torch- and CTranslate2-based backends (so "auto", "mps", or
-"xpu" still reach the library that understands them) and treated as CPU for the
-onnxruntime-based ones, which need an explicit provider list.
+Accepted values are "cpu", "cuda", "cuda:N", "rocm", and "rocm:N". Anything
+else is passed through unchanged to the torch- and CTranslate2-based backends (so
+"auto", "mps", or "xpu" still reach the library that understands them) and
+treated as CPU for the onnxruntime-based ones, which need an explicit provider
+list.
 """
 
 import logging
@@ -22,19 +23,22 @@ OnnxProvider = Union[str, Tuple[str, Dict[str, Any]]]
 
 _CPU_PROVIDER = "CPUExecutionProvider"
 _CUDA_PROVIDER = "CUDAExecutionProvider"
+_MIGRAPHX_PROVIDER = "MIGraphXExecutionProvider"
+
+
+def is_rocm(device: str) -> bool:
+    """Report whether a device string names a ROCm GPU."""
+    return device.strip().lower().startswith("rocm")
 
 
 def is_gpu(device: str) -> bool:
-    """Report whether a device string names a CUDA GPU.
-
-    Only CUDA is recognized: it is the one backend family every library in this
-    project can target (CTranslate2 has no ROCm or XPU backend at all).
-    """
-    return device.strip().lower().startswith("cuda")
+    """Report whether a device string names a supported GPU family."""
+    normalized = device.strip().lower()
+    return normalized.startswith("cuda") or normalized.startswith("rocm")
 
 
 def device_index(device: str) -> Optional[int]:
-    """Extract the GPU ordinal from "cuda:N", or None if unspecified."""
+    """Extract the GPU ordinal from "cuda:N" or "rocm:N"."""
     _, _, index = device.strip().lower().partition(":")
     if not index:
         return None
@@ -49,24 +53,29 @@ def device_index(device: str) -> Optional[int]:
 def torch_device(device: str) -> str:
     """Return the device string for a torch-based backend (transformers, FunASR).
 
-    torch understands "cuda" and "cuda:N" directly, so this is a passthrough
-    that exists to normalize whitespace and to give the handlers a single named
-    entry point alongside the other translations here.
+    PyTorch deliberately reuses its "cuda" API for ROCm devices.
     """
-    return device.strip()
+    normalized = device.strip()
+    if is_rocm(normalized):
+        _, separator, index = normalized.lower().partition(":")
+        return f"cuda{separator}{index}"
+
+    return normalized
 
 
 def ctranslate2_device(device: str) -> Tuple[str, Optional[int]]:
     """Return (device, device_index) for faster-whisper.
 
-    CTranslate2 takes the ordinal as a separate ``device_index`` argument rather
-    than as part of the device string, so "cuda:1" has to be split apart.
+    CTranslate2 calls both CUDA and ROCm devices "cuda". It also takes the ordinal
+    as a separate ``device_index`` argument rather than as part of the device
+    string.
     """
+    translated = torch_device(device) if is_rocm(device) else device.strip()
     index = device_index(device)
     if index is None:
-        return device.strip(), None
+        return translated, None
 
-    base, _, _ = device.strip().partition(":")
+    base, _, _ = translated.partition(":")
     return base, index
 
 
@@ -75,9 +84,10 @@ def sherpa_provider(device: str) -> str:
 
     Requires a CUDA-enabled sherpa-onnx build. The CPU wheel published on PyPI
     accepts provider="cuda" and silently runs on the CPU anyway, so a GPU image
-    must install the "+cuda" wheel from the k2-fsa index.
+    must install the "+cuda" wheel from the k2-fsa index. sherpa-onnx does not
+    currently expose a ROCm provider.
     """
-    return "cuda" if is_gpu(device) else "cpu"
+    return "cuda" if device.strip().lower().startswith("cuda") else "cpu"
 
 
 def onnx_providers(device: str) -> List[OnnxProvider]:
@@ -89,43 +99,46 @@ def onnx_providers(device: str) -> List[OnnxProvider]:
     if not is_gpu(device):
         return [_CPU_PROVIDER]
 
+    gpu_provider = _MIGRAPHX_PROVIDER if is_rocm(device) else _CUDA_PROVIDER
     index = device_index(device)
     if index is None:
-        return [_CUDA_PROVIDER, _CPU_PROVIDER]
+        return [gpu_provider, _CPU_PROVIDER]
 
-    return [(_CUDA_PROVIDER, {"device_id": index}), _CPU_PROVIDER]
+    return [(gpu_provider, {"device_id": index}), _CPU_PROVIDER]
 
 
 def warn_if_no_onnx_gpu(device: str, providers: Sequence[str]) -> bool:
-    """Warn when a GPU was asked for but onnxruntime is not using CUDA.
+    """Warn when a requested GPU provider is not in use by onnxruntime.
 
     Takes the provider list as an argument rather than importing onnxruntime, so
     this module stays importable (and testable) without it. Returns whether the
     GPU is in use.
 
     Prefer passing a live session's ``get_providers()`` over
-    ``ort.get_available_providers()``: the latter lists the CUDA provider as
-    available even when its shared library cannot be loaded (the usual cause
-    being an onnxruntime-gpu built for a different CUDA major version than the
-    one installed), in which case sessions silently fall back to the CPU. Either
-    way the failure is quiet - every model still loads and transcribes, just not
-    on the GPU - so it is worth a warning rather than leaving it to be noticed as
-    "the GPU image is no faster".
+    ``ort.get_available_providers()``: the latter can list a GPU provider even
+    when its shared library cannot be loaded, in which case sessions silently
+    fall back to the CPU. Either way the failure is quiet, so it is worth a
+    warning rather than leaving it to be noticed as "the GPU image is no faster".
     """
     if not is_gpu(device):
         return False
 
-    if _CUDA_PROVIDER in providers:
+    gpu_provider = _MIGRAPHX_PROVIDER if is_rocm(device) else _CUDA_PROVIDER
+    if gpu_provider in providers:
         return True
 
+    runtime_package = "onnxruntime-migraphx" if is_rocm(device) else "onnxruntime-gpu"
+    runtime_requirements = "ROCm/MIGraphX" if is_rocm(device) else "CUDA/cuDNN"
     _LOGGER.warning(
         "Device '%s' was requested but onnxruntime is not using %s "
         "(in effect: %s), so inference will run on the CPU. Either "
-        "onnxruntime-gpu is not installed, or its CUDA/cuDNN requirements are "
+        "%s is not installed, or its %s requirements are "
         "not met here - check the onnxruntime errors logged above.",
         device,
-        _CUDA_PROVIDER,
+        gpu_provider,
         ", ".join(providers) or "none",
+        runtime_package,
+        runtime_requirements,
     )
     return False
 

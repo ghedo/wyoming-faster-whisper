@@ -254,9 +254,9 @@ class Qwen3AsrTranscriber(Transcriber):
         options = ort.SessionOptions()
         options.intra_op_num_threads = cpu_threads
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # The int4 weights are MatMulNBits nodes. The CUDA provider supports
-        # them, but the quantization is where most of this model's speed comes
-        # from, so the GPU win here is smaller than for the fp32 backends.
+        # The int4 weights are MatMulNBits nodes. GPU providers can partition
+        # unsupported nodes onto the CPU fallback, so the speedup depends on the
+        # provider and is smaller than for the fp32 backends.
         session_args = {
             "sess_options": options,
             "providers": onnx_providers(device),
@@ -267,7 +267,7 @@ class Qwen3AsrTranscriber(Transcriber):
         )
 
         # Ask the session that was actually created, not onnxruntime's advertised
-        # provider list: a CUDA provider that fails to load is still advertised.
+        # provider list: a GPU provider that fails to load can still be advertised.
         warn_if_no_onnx_gpu(device, self._encoder.get_providers())
 
         self._merged: Optional[ort.InferenceSession] = None
