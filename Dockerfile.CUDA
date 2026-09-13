@@ -2,16 +2,16 @@
 #
 # Not published to Docker Hub - build it locally:
 #
-#   docker build -f Dockerfile.gpu -t wyoming-whisper:gpu .
+#   docker build -f Dockerfile.CUDA -t wyoming-whisper:cuda .
 #
 # It comes out around 10.7 GB (mostly the CUDA torch wheel) against ~1.6 GB for
 # the CPU image, and Home Assistant OS has no GPU passthrough, so its entire
 # audience is already running Docker directly.
 #
-# amd64 only, and NVIDIA only: CTranslate2 (faster-whisper) has no ROCm or XPU
-# backend and no arm64 CUDA wheel, so it is the constraint that decides the
-# scope of this image. Jetson would need an nvcr.io/nvidia/l4t base and
-# JetPack-specific wheels; that is a separate image, not a platform of this one.
+# amd64 and NVIDIA only. Use Dockerfile.ROCm for AMD GPUs. CTranslate2 has no
+# arm64 CUDA wheel; Jetson would need an nvcr.io/nvidia/l4t base and
+# JetPack-specific wheels, so it is a separate image rather than a platform of
+# this one.
 #
 # The base supplies cuBLAS, NVRTC, and cuDNN 9, which CTranslate2 4.x,
 # onnxruntime-gpu, and the sherpa-onnx CUDA build all link against. Run with

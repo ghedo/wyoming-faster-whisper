@@ -13,7 +13,7 @@ import numpy as np
 import sherpa_onnx as so
 
 from .const import StreamingSession, Transcriber
-from .device import is_gpu, sherpa_provider
+from .device import is_gpu, is_rocm, sherpa_provider
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,12 +159,20 @@ def _resolve_provider(device: str) -> str:
     stated rather than silently discovered as "the GPU image is no faster". A
     CUDA build ships an extra provider library next to the Python module.
 
-    Note that the CUDA build is deliberately *not* used in the GPU image: its
+    Note that the CUDA build is deliberately *not* used in the CUDA image: its
     bundled onnxruntime and the pip onnxruntime-gpu package cannot both
     initialize CUDA in one process without crashing, and `--stt-library auto`
-    can load two backends at once. See Dockerfile.gpu.
+    can load two backends at once. See Dockerfile.CUDA.
     """
     if not is_gpu(device):
+        return "cpu"
+
+    if is_rocm(device):
+        _LOGGER.warning(
+            "Device '%s' was requested but sherpa-onnx has no ROCm provider; "
+            "running on the CPU instead.",
+            device,
+        )
         return "cpu"
 
     lib_dir = Path(so.__file__).parent / "lib"
